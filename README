@@ -1,0 +1,34 @@
+Sample scripts using the vtrace API
+
+simpleAPI
+    List of functions to use as reference on how to accomplish specific tasks.
+
+simpleAttach
+    Script that attaches to a given PID and continues execution of the program.
+
+simpleDisasm
+    Script that converts a string of hex data to assembly output.
+
+simpleFunctionList
+    Script that outputs all the functions in a dll, in this case ntdll.
+
+simpleNotifier
+    Script that implements a notifier class to output data when specific signals are caught.
+
+simpleOEP
+    Script that parses the PE headers and calculates Original Entry Point (OEP).
+
+simpleReg
+    Script that prints out the current values of some registers.
+
+simpleRet
+    Calculates the return address of a function upon entering into the function.
+
+simpleRun
+    Script showing how to start a program with the debugger attached and continue execution.
+
+simpleSnapshot
+    Takes a snapshot of memory after a process is run to OEP.  Saves the snapshot to a file called zTest.snap.
+
+simpleStalker
+    Uses the stalker functionality within vtrace.
