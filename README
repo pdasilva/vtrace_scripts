@@ -1,5 +1,12 @@
 Sample scripts using the vtrace API
 
+NOTES:
+To run these scritps you need the latest version of vdb from:
+http://www.kenshoto.com/vtrace/releases/
+
+Untar the latest version and place the scripts in the folder to make them work.
+
+##
 simpleAPI
     List of functions to use as reference on how to accomplish specific tasks.
 
@@ -8,6 +15,9 @@ simpleAttach
 
 simpleDisasm
     Script that converts a string of hex data to assembly output.
+
+simpleFollowChild
+    Script that follows a child process created from CreateProcessA in windows.  Will breakpoint on the first instruction executing in the child process.
 
 simpleFunctionList
     Script that outputs all the functions in a dll, in this case ntdll.
