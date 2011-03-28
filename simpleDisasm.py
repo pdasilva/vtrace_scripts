@@ -1,4 +1,9 @@
 import sys
+import simpleAPI as v_api
+#VDB_ROOT = "<path-to-VDB>"
+
+sys.path.append(VDB_ROOT)
+
 import pickle
 from socket import htonl
 import vtrace
@@ -11,29 +16,30 @@ import vtrace.snapshot as vs_snap
 import PE as PE
 import binascii
 
-shell = (
-"\x90\x90\x90\x90\x90\xCC\xCC\xCC\xCC"
-)
+#######################################################################
+def load_binary(shellcode, base=None):
+    trace = vtrace.getTrace()
+
+    try:
+        v_api.disasm(trace, binascii.unhexlify(shellcode))
+    except:
+        f = open(shellcode, 'rb')
+        tmp = f.read()
+        f.close()
+        
+        shell = binascii.unhexlify(tmp)
+        v_api.disasm(trace, shell)
+
+######################################################################
+def main(argv):
+    if len(argv) != 2:
+        print "Usage: %s <shell code>" % sys.argv[0]
+        sys.exit(1)
+
+    shellcode = sys.argv[1]
+
+    load_binary(shellcode)
 
 if __name__ == "__main__":
-    pid = None
-    cmd = ""
-    trace = vtrace.getTrace()
-    
-    d = dis.i386Disasm()
-    i = 0
-    count = 0
-    while count < len(shell):
-        try:
-            op = trace.makeOpcode(shell, offset=i, va=0)
-            print "%14s:\t %s" %(shell[count:count+op.size].encode('hex'), op)
-            #print "COUNT: ", count
-            #print "OP SIZE: ", op.size
-            i += 1
-            count += op.size
-        except:
-            print "ERROR: ", sys.exc_info()[1]
-            i += 1
-            count += 1
-            continue
-
+    main(sys.argv)
+    sys.exit(0)

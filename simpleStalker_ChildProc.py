@@ -30,10 +30,18 @@ def load_binary(filepath, base=None):
     # Call a function to set BP on OEP
     oep = v_api.getOEP(trace, filepath)
     print "OEP: %x" % oep
+
+#######################################################################
+# Add a breakpoint on CreateProcessA
+# Run until the breakpoint   
+    pattern = "kernel32.CreateProcessA"
+    v_api.setBpOnPattern(trace, pattern)
+    trace.run()
+    trace = v_api.followCreateProcessA(trace)
 ##########################################################
     # Stalker
     #addr is here since child process doens't start at oep
-    addr = oep
+    addr = 0x004015ac
 
     try:
         v_stalker.addStalkerEntry(trace, addr)

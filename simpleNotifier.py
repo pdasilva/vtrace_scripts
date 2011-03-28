@@ -1,4 +1,9 @@
 import sys
+import simpleAPI as v_api
+#VDB_ROOT = "<path-to-VDB>"
+
+sys.path.append(VDB_ROOT)
+
 import vtrace
 import vdb
 import PE as PE
@@ -93,68 +98,14 @@ def getOpCode(trace, eip):
     op1 = trace.makeOpcode(s, 0, eip)
     return op1
 
-def getOEP(trace, name):
-    # Get a dictionary list of all DLL and PE files loaded by this PE 
-    bases = trace.getMeta("LibraryBases")
-
-    entryPoint = None
-    imageBase = None
-
-    # Iterate over the list of all PE files in memory looking for our specific one
-    for libname in trace.getNormalizedLibNames():
-        if name in libname:
-            # Pulls the library address from trace.getMeta("LibraryBases") dictionary
-            base = bases.get(libname.strip(), None) 
-            try:
-                pobj = PE.peFromMemoryObject(trace, base)
-            except Exception, e:
-                print('Error: %s (0x%.8x) %s' % (libname, base, e))
-                continue
-
-            # Parse the PE NT Headers looking for the variables we need
-            t = pobj.IMAGE_NT_HEADERS.tree()
-            for attr in t.split('\n'):
-                if "AddressOfEntryPoint" in attr:
-                    entryPoint = attr.split(': ')[1].split()[0]
-                    #print "Address Of Entry Point: ", entryPoint.strip(None)
-                    
-                if "ImageBase" in attr:
-                    imageBase = attr.split(':')[1].split(' ')[1]
-                    #print "ImageBase: ", imageBase.strip(None)
-
-            # Parse the PE sections for variables in the .text section
-            for s in pobj.getSections():
-                if s.Name.split("\x00", 1)[0] == '.text':
-                    for sec in s.tree().split('\n'):
-                        if "VirtualSize" in sec:
-                            virtualSize = sec.split(': ')[1].split()[0]
-                            #print "VirtualSize: ", virtualSize
-                        if "VirtualAddress" in sec:
-                            virtualAddress = sec.split(': ')[1].split()[0]
-                            #print "VirtualAddress: ", virtualAddress
-    
-    # Original Entry Point is calculated as:
-    # Entry Point + Image Base
-    if entryPoint and imageBase:
-        OEP = int(entryPoint, 0) + int(imageBase, 0)
-        return OEP
-    else:
-        return None
-
-
-if __name__ == "__main__":
-    pid = None
-    cmd = "C:\\pwnables100.exe"
-    
+#######################################################################
+def load_binary(filepath, base=None):
     # Get the current trace object from vtrace
     trace = vtrace.getTrace()
 
     # If attempting to attach to a 64 bit process
     # 64 bit python is required.
-    if pid != None:
-        trace.attach(pid)
-    elif cmd != None:
-        trace.execute(cmd)
+    trace.execute(filepath)
 ###############################################################
     # The notifier class we want to register
     notif = CustomNotifier()
@@ -163,9 +114,8 @@ if __name__ == "__main__":
     # Tell our vtrace object that we want to capture all events with CustomNotifier
     trace.registerNotifier(eve, notif)
 ###############################################################
-    
     # Call a function to set BP on OEP
-    oep = getOEP(trace, "pwnables100")
+    oep = v_api.getOEP(trace, filepath)
 
     # Set breakpoint at address
     bp = vtrace.Breakpoint(oep)
@@ -182,3 +132,16 @@ if __name__ == "__main__":
     # Deregister our notifier
     trace.deregisterNotifier(eve, notif)
 
+######################################################################
+def main(argv):
+    if len(argv) != 2:
+        print "Usage: %s <exe bin>" % sys.argv[0]
+        sys.exit(1)
+
+    filepath = sys.argv[1]
+
+    load_binary(filepath)
+
+if __name__ == "__main__":
+    main(sys.argv)
+    sys.exit(0)

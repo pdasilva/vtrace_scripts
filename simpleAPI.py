@@ -1,8 +1,17 @@
+#VDB_ROOT = "<path-to-VDB>"
+
 import sys
+sys.path.append(VDB_ROOT)
+
 import vtrace
 import vdb
+
 import envi
+import envi.archs.i386.disasm as dis
 from envi.archs.i386 import *
+import envi.memory as mem
+
+
 import PE as PE
 import vtrace.envitools as envitools
 import vtrace.snapshot as vs_snap
@@ -11,6 +20,7 @@ import vdb.recon.sniper as v_sniper
 import vdb.stalker as v_stalker
 
 AddrFmt='L'
+debug = False
 
 # Sample Notifier class
 # Prints a statement for each type of event encountered
@@ -139,27 +149,10 @@ def findFunc(trace, pattern):
         for sym in trace.getSymsForFile(libname):
             r = repr(sym)
             if pattern != None:
-                if r.lower().find(pattern) == -1:
+                if r.lower().find(pattern.lower()) == -1:
                      continue
-            #print("0x%.8x %s" % (sym.value, r))
+            print("0x%.8x %s" % (sym.value, r))
             return sym.value
-
-# NOTE Not working yet
-def setBpOnLib(trace, libname, regex):
-    try:
-       for sym in trace.searchSymbols(regex, libname=libname):
-
-        symstr = str(sym)
-        symval = long(sym)
-        if trace.getBreakpointByAddr(symval) != None:
-            print('Duplicate (0x%.8x) %s' % (symval, symstr))
-            continue
-        bp = vtrace.Breakpoint(None, expression=symstr)
-        trace.addBreakpoint(bp)
-        print('Added: %s' % symstr)
-
-    except re.error, e:
-        print('Invalid Regular Expression: %s' % regex)
 
 def setBpOnPattern(trace, pattern):
     addr = findFunc(trace, pattern)
@@ -170,50 +163,178 @@ def printBp(trace):
     for bp in trace.getBreakpoints():
         print("%s enabled: %s" % (bp, bp.isEnabled()))
 
-def getOEP(trace, name):
-    # Get a dictionary list of all DLL and PE files loaded by this PE 
-    bases = trace.getMeta("LibraryBases")
+def getOEP(trace, filepath):
+    base = None
 
-    entryPoint = None
-    imageBase = None
-
-    # Iterate over the list of all PE files in memory looking for our specific one
-    for libname in trace.getNormalizedLibNames():
-        if name in libname:
-            # Pulls the library address from trace.getMeta("LibraryBases") dictionary
-            base = bases.get(libname.strip(), None) 
-            try:
-                pobj = PE.peFromMemoryObject(trace, base)
-            except Exception, e:
-                print('Error: %s (0x%.8x) %s' % (libname, base, e))
-                continue
-
-            # Parse the PE NT Headers looking for the variables we need
-            t = pobj.IMAGE_NT_HEADERS.tree()
-            for attr in t.split('\n'):
-                if "AddressOfEntryPoint" in attr:
-                    entryPoint = attr.split(': ')[1].split()[0]
-                    #print "Address Of Entry Point: ", entryPoint.strip(None)
-                    
-                if "ImageBase" in attr:
-                    imageBase = attr.split(':')[1].split(' ')[1]
-                    #print "ImageBase: ", imageBase.strip(None)
-
-            # Parse the PE sections for variables in the .text section
-            for s in pobj.getSections():
-                if s.Name.split("\x00", 1)[0] == '.text':
-                    for sec in s.tree().split('\n'):
-                        if "VirtualSize" in sec:
-                            virtualSize = sec.split(': ')[1].split()[0]
-                            #print "VirtualSize: ", virtualSize
-                        if "VirtualAddress" in sec:
-                            virtualAddress = sec.split(': ')[1].split()[0]
-                            #print "VirtualAddress: ", virtualAddress
+    libs = trace.getMeta("LibraryPaths")
+    for k, v in libs.iteritems():
+        if filepath in v:
+            base = k
     
-    # Original Entry Point is calculated as:
-    # Entry Point + Image Base
-    if entryPoint and imageBase:
-        OEP = int(entryPoint, 0) + int(imageBase, 0)
-        return OEP
+    if base is None:
+        p = PE.peFromFileName(filepath)
+        base = p.IMAGE_NT_HEADERS.OptionalHeader.ImageBase
     else:
-        return None
+        p = PE.peFromMemoryObject(trace, base)
+
+    ep = p.IMAGE_NT_HEADERS.OptionalHeader.AddressOfEntryPoint
+    oep = base + ep
+    return oep
+
+# This function will change the input variables so that child process
+# starts paused.  Then reads the PID of the newly created child process 
+# and attaches to it
+# NOTE: trace object should be at the _1st_ instruction in CreateProcessA
+# for this to function.  Upon return you will be at OEP for child process 
+def followCreateProcessA(trace):
+    dwAddr = trace.getRegister(REG_ESP)
+
+    dwAddr +=4#remove eip
+    dwAddr +=4#remove lpApplicationName
+    dwAddr +=4#remove lpCommandLine
+    dwAddr +=4#remove procattrs
+    
+    dwAddr +=4#remove threadattrs
+    dwAddr +=4#remove inheritHandles
+    dwCreateFlags=struct.unpack("I",trace.readMemory(dwAddr,4))[0]
+    dwCreateFlags|=4
+    dwCreateFlags=struct.pack("I",dwCreateFlags)
+    try:
+        trace.writeMemory(dwCreateFlags,dwAddr)
+    except:
+        pass
+
+    # Add a breakpoint on the return address from CreateProcessA
+    # Run to it and then call afterCreateProcessA
+    # This is so the PID variable is populated.
+
+    esp = trace.getRegister(REG_ESP)
+    ret = trace.readMemory(esp,4)
+    ret2 = struct.unpack("I",ret)[0]
+    bp = vtrace.Breakpoint(None, expression=hex(ret2))
+    trace.addBreakpoint(bp)
+    printBp(trace)
+
+    trace.run()
+    esp = trace.getRegister(REG_ESP)
+
+    dwAddr = esp
+    dwAddr -=44#move esp to location of stack from CreateProcessA
+    dwAddr +=24#move esp to location after some CreateProcessA variables
+
+    dwAddr +=4#remove dwCreationFlags
+    dwAddr +=4#remove lpEnvironment
+    
+    dwAddr +=4#remove lpCurrentDirectory
+    dwAddr +=4#remove lsStartupInfo
+    # dwAddr points to lpProcessInformation
+    #print "dwAddr: ", dwAddr
+    procid = trace.readMemory(dwAddr, 4)
+    procid = struct.unpack("I", procid)[0]
+    procid +=4#remove hProcess
+    procid +=4#remove hThread
+    # procid points to dwProcessId
+    try:
+        pid = struct.unpack("I", trace.readMemory(procid, 4))[0]
+        print "ProcID: ", pid
+        if pid != None:
+            trace.attach(pid)
+            print "ADD TRACE: ", trace.getPid()
+    except:
+        pass
+
+    return trace
+
+# Change the permissions on the memory map containing addr 
+# removing execute permissions.  
+# Catch the exception in the notifier, change the permissions
+# back and continue running the child process with the debugger attached.
+# NOTE: Notifier must be enabled before the call to this function.    
+def nxMemPerm(trace, addr):
+    memMap = trace.getMemoryMap(addr)
+    begin = memMap[0]
+    size = memMap[1]
+    print ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
+    print "OEP: ", hex(addr)
+
+    trace.protectMemory(begin, size, envi.memory.MM_NONE)
+    print "MEMORY NX SET"
+    print ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
+    trace.run()
+
+# Will parse the PE in memory and return the array containing the IAT
+# If verbose is true it will also print out the IAT
+def printIAT(trace, filepath, verbose=False):
+    base = None
+
+    libs = trace.getMeta("LibraryPaths")
+    for k, v in libs.iteritems():
+        if filepath in v:
+            base = k
+
+    if base is None:
+        p = PE.peFromFileName(filepath)
+        base = p.IMAGE_NT_HEADERS.OptionalHeader.ImageBase
+    else:
+        p = PE.peFromMemoryObject(trace, base)
+
+    IMAGE_DIRECTORY_ENTRY_IMPORT          =1   # Import Directory
+    IMAGE_DIRECTORY_ENTRY_IAT            =12   # Import Address Table
+
+    idir = p.IMAGE_NT_HEADERS.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT]
+    poff = p.rvaToOffset(idir.VirtualAddress)
+    psize = idir.Size
+    # Once you have VirtualAddress BP on that and you can stop 
+    # the program before any external call.
+   
+    p.parseImports()
+    if verbose == True:
+        for i in p.imports:
+            print("Address: %s \tLibrary: %s \tFirstThunk: %s" % (i[0], i[1], i[2]))
+    return p.imports
+
+# Will decode shellcode in a linear manner
+# shellcode must be in the format '\x90\x90\xCC\xCC'
+# for the code to function properly
+def disasm(trace, shell):
+    d = dis.i386Disasm()
+    i = 0
+    count = 0
+    while count < len(shell):
+        try:
+            op = trace.makeOpcode(shell, offset=i, va=0)
+            print "%14s:\t %s" %(shell[count:count+op.size].encode('hex'), op)
+            #print "COUNT: ", count
+            #print "OP SIZE: ", op.size
+            i += 1
+            count += op.size
+        except:
+            print "ERROR: ", sys.exc_info()[1]
+            i += 1
+            count += 1
+            continue
+
+############################################################
+# Super ghetto, not recommended
+def addOpCodeToList(opList):
+    try:
+        opList[getEIP(trace)] += 1
+    except:
+        opList[getEIP(trace)] = 1
+
+
+
+def mainTemplate(argv):
+    if len(argv) != 2:
+        # sys.argv[0] is the name of the script
+        print "Usage: %s <exe bin>" % sys.argv[0]
+        sys.exit(1)
+
+    # sys.argv[1] is the first argument passed to script
+    filepath = sys.argv[1]
+   
+    load_binary(filepath)
+    
+# if __name__ == "__main__":
+#     main(sys.argv)
+#     sys.exit(0)

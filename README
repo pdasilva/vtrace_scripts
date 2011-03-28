@@ -2,9 +2,9 @@ Sample scripts using the vtrace API
 
 NOTES:
 To run these scritps you need the latest version of vdb from:
-http://www.kenshoto.com/vtrace/releases/
+http://visi.kenshoto.com/releases/
 
-Untar the latest version and place the scripts in the folder to make them work.
+Untar the latest version and update the VDB_ROOT in the scripts to make them work.
 
 ##
 simpleAPI
@@ -20,7 +20,10 @@ simpleFollowChild
     Script that follows a child process created from CreateProcessA in windows.  Will breakpoint on the first instruction executing in the child process.
 
 simpleFunctionList
-    Script that outputs all the functions in a dll, in this case ntdll.
+    Script that outputs all the functions in a dll.
+
+simpleIAT
+    Prints out the import table for the given executable.
 
 simpleNotifier
     Script that implements a notifier class to output data when specific signals are caught.
@@ -42,3 +45,7 @@ simpleSnapshot
 
 simpleStalker
     Uses the stalker functionality within vtrace.
+
+simpleStalker_ChildProc
+    Uses the stalker functionality to stalk a child process.  Combination of the simpleFollowChild and simpleStalker scripts.
+    
