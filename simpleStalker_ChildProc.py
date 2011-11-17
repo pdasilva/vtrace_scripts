@@ -22,6 +22,7 @@ def load_binary(filepath, base=None):
     
     # Get the current trace object from vtrace
     trace = vtrace.getTrace()
+    trace.setMode("FastBreak", True)
 
     # If attempting to attach to a 64 bit process
     # 64 bit python is required.

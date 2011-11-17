@@ -3,6 +3,8 @@
 import sys
 sys.path.append(VDB_ROOT)
 
+import binascii
+
 import vtrace
 import vdb
 
@@ -13,8 +15,11 @@ import envi.memory as mem
 
 
 import PE as PE
+#import vstruct
+
 import vtrace.envitools as envitools
 import vtrace.snapshot as vs_snap
+
 import vdb.recon as v_recon
 import vdb.recon.sniper as v_sniper
 import vdb.stalker as v_stalker
@@ -254,29 +259,28 @@ def nxMemPerm(trace, addr):
     memMap = trace.getMemoryMap(addr)
     begin = memMap[0]
     size = memMap[1]
-    print ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
-    print "OEP: ", hex(addr)
+    #print ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
+    #print "FROM: ", hex(begin)
+    #print "SIZE: ", size
 
     trace.protectMemory(begin, size, envi.memory.MM_NONE)
-    print "MEMORY NX SET"
-    print ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
+    print "[*] Memory Perm Set to None from: %s size: %s" % (hex(begin), size)
+    #print ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
     trace.run()
 
 # Will parse the PE in memory and return the array containing the IAT
 # If verbose is true it will also print out the IAT
-def printIAT(trace, filepath, verbose=False):
-    base = None
-
+def printIAT(trace, fileName, verbose=False):
+    #print "FileName: %s" % fileName
+    
     libs = trace.getMeta("LibraryPaths")
-    for k, v in libs.iteritems():
-        if filepath in v:
-            base = k
+    libBase = trace.getMeta("LibraryBases")
+    #print "Lib Base: %s" % libBase
+    #print "File Name: %s" % fileName
 
-    if base is None:
-        p = PE.peFromFileName(filepath)
-        base = p.IMAGE_NT_HEADERS.OptionalHeader.ImageBase
-    else:
-        p = PE.peFromMemoryObject(trace, base)
+    base = libBase[fileName.lower()]
+
+    p = PE.peFromMemoryObject(trace, base)
 
     IMAGE_DIRECTORY_ENTRY_IMPORT          =1   # Import Directory
     IMAGE_DIRECTORY_ENTRY_IAT            =12   # Import Address Table
@@ -290,8 +294,224 @@ def printIAT(trace, filepath, verbose=False):
     p.parseImports()
     if verbose == True:
         for i in p.imports:
-            print("Address: %s \tLibrary: %s \tFirstThunk: %s" % (i[0], i[1], i[2]))
-    return p.imports
+            print("Address: %s \tLibrary: %s \tFirstThunk: %s" % (hex(base+i[0]), i[1], i[2]))
+    return base, p.imports
+
+# Will parse the PE in memory and return the array containing the IAT
+# If verbose is true it will also print out the IAT
+def getIATLocation(trace, fileName, verbose=False):
+    #print "FileName: %s" % fileName
+    
+    libs = trace.getMeta("LibraryPaths")
+    libBase = trace.getMeta("LibraryBases")
+    #print "Lib Base: %s" % libBase
+    #print "File Name: %s" % fileName
+
+    base = libBase[fileName.lower()]
+
+    p = PE.peFromMemoryObject(trace, base)
+
+    IMAGE_DIRECTORY_ENTRY_IMPORT          =1   # Import Directory
+    IMAGE_DIRECTORY_ENTRY_IAT            =12   # Import Address Table
+
+    idir = p.IMAGE_NT_HEADERS.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT]
+    poff = p.rvaToOffset(idir.VirtualAddress)
+    psize = idir.Size
+    # Once you have VirtualAddress BP on that and you can stop 
+    # the program before any external call.
+    return base, poff, psize
+
+# Store the IAT under the meta name
+def store_IAT(trace, base, importTable, metaname):
+    for i in importTable:
+        #print "[*] \tAddr: %s \tLibrary: %s [*] \tFunction: %s" % (hex(base+i[0]), i[1], i[2])
+
+        instr = trace.getMeta(metaname)
+        if instr == None:
+            trace.setMeta(metaname, {base+i[0]:i[1]+':'+i[2]})
+        else:
+            instr[base+i[0]] = i[1]+':'+i[2]
+            #instr.append(hex(base+i[0])+':'+i[1]+':'+i[2])
+            trace.setMeta(metaname, instr)
+
+# Call this function from within a notifier to handle breakpoints on IAT
+def iat_handler(event, trace):
+    print "[*] Got event: %d from pid %d" % (event, trace.getPid())
+
+    if event == vtrace.NOTIFY_SIGNAL:
+        #print "vtrace.NOTIFY_SIGNAL"
+        print "[*] PendingSignal",trace.getMeta("PendingSignal")
+        print "[*] PendingException",trace.getMeta("PendingException")
+        if trace.getMeta("Platform") == "Windows":
+            win32event = trace.getMeta("Win32Event")
+            print "[*] ExceptionAddress: %(ExceptionAddress)x" % win32event
+            
+            eip = trace.getRegister(REG_EIP)
+            print "[*] Bestname: ", trace.getSymByAddr(eip, exact=False)
+            
+            dis = getOpCode(trace, trace.getRegister(REG_EIP))
+            disLen = len(dis)
+            opcode = trace.readMemory(eip, len(dis))
+            
+            print "%16s: %s" % ("DIS", dis)
+            print "%16s: %s" % ("OPCODE", repr(opcode))
+
+            print "%16s: %s" % ("EAX", hex(trace.getRegister(REG_EAX)))
+            es = trace.getRegisterByName("es")
+            print "%16s: %s" % ("ES", es)
+            ds = trace.getRegisterByName("ds")
+            print "%16s: %s" % ("DS", ds)
+            cs = trace.getRegisterByName("cs")
+            print "%16s: %s" % ("CS", cs)
+            edi = trace.getRegister(REG_EDI)
+            print "%16s: %s" % ("EDI", hex(edi))
+            esi = trace.getRegister(REG_ESI)
+            print "%16s: %s" % ("ESI", hex(esi))
+            esp = trace.getRegister(REG_ESP)
+            print "%16s: %s" % ("ESP", hex(esp))
+            print "%16s: %s" % ("[ESP]", repr(trace.readMemory(esp, 4)))
+            
+            ef = trace.getRegisterByName("eflags")
+            print("%16s: %s" % ("Direction", bool(ef & EFLAGS_DF)))
+
+            #print("%16s: %s" % ("Carry", bool(ef & EFLAGS_CF)))
+            #print("%16s: %s" % ("Parity", bool(ef & EFLAGS_PF)))
+            #print("%16s: %s" % ("Adjust", bool(ef & EFLAGS_AF)))
+            #print("%16s: %s" % ("Zero", bool(ef & EFLAGS_ZF)))
+            #print("%16s: %s" % ("Sign", bool(ef & EFLAGS_SF)))
+            #print("%16s: %s" % ("Trap", bool(ef & EFLAGS_TF)))
+            #print("%16s: %s" % ("Interrupt", bool(ef & EFLAGS_IF)))
+            #print("%16s: %s" % ("Overflow", bool(ef & EFLAGS_OF)))
+            
+            #regs = trace.getRegisters()
+            #print "REGS: ", regs
+            #rnames = regs.keys()
+            #rnames.sort()
+
+            # function takes in just filename not the full path to filename.exe
+            filepath = trace.getMeta('ExeName')
+            exeName = filepath.split(".exe")[0]
+            fileName = exeName.split("\\")[len(exeName.split("\\"))-1]
+
+            if(trace.getMeta('IATLocation') == None):
+                base, poff, psize = getIATLocation(trace, fileName)
+                trace.setMeta('IATLocation', {'base':base, 'poff':poff, 'psize':psize})
+            else:
+                iatLoc = trace.getMeta('IATLocation')
+                base = iatLoc['base']
+                poff = iatLoc['poff']
+                psize = iatLoc['psize']
+
+            memMap = trace.getMemoryMap(base+poff)
+            begin = memMap[0]
+            size = memMap[1]
+
+            trace.protectMemory(begin, size, envi.memory.MM_RWX)
+
+            # Check the opcode to see if it is a call or a deref call
+            if (ord(opcode[0]) == 255 and ord(opcode[1]) == 21):
+                # Increment eip by length of command to get next eip
+                # then pack it so it will be written to memory correctly
+
+                nextAddr = eip + disLen
+                pack = struct.pack("I", nextAddr)
+                
+                # Get esp register location and sub 4 bytes to simulate push
+                esp = trace.getRegister(REG_ESP)
+                popesp = esp - 4
+                
+                # write 4 byte next eip to new esp location
+                # then update esp variable 
+                trace.setRegister(REG_ESP, popesp)
+                esp = trace.getRegister(REG_ESP)
+
+                # write the return addr to the new esp location
+                trace.writeMemory(esp, pack)
+
+            # Check the opcode to see if it is a call or a deref call
+            if (ord(opcode[0]) == 255 and ord(opcode[1]) == 21):
+                tmp = struct.unpack("I",opcode[len(dis)-4:len(dis)])[0]
+                newEip = tmp
+                
+                newOpcode = "\xFF\x25"
+                newOpcode += struct.pack("I", newEip)
+
+                trace.writeMemory(eip, newOpcode)
+
+            eip = trace.getRegister(REG_EIP)
+            dis = getOpCode(trace, trace.getRegister(REG_EIP))
+            
+            # Check for \xff to determine if a deref call
+            if (ord(opcode[0]) == 255):
+            #and ord(opcode[1]) == 21) or (ord(opcode[0]) == 255 and ord(opcode[1]) == 37)):
+                #print "OPCODE: %s" % repr(opcode)
+                tmp_addr = struct.unpack("I",opcode[len(dis)-4:len(dis)])[0]
+
+                ################################
+                # Get the list of imported functions to compare against
+                instr = trace.getMeta('IATInfo')
+
+                try:
+                    print "TMP_ADDR: %s" % hex(tmp_addr)
+                    a = instr[tmp_addr]
+                    b = a.split(':')
+
+                    print "[*] \tLibrary: %s \n[*] \tFunction: %s" % (b[0], b[1])
+
+                    lst = trace.getMeta('IATList')
+                    if lst == None:
+                        trace.setMeta('IATList', [hex(tmp_addr)+':'+b[0]+':'+b[1]])
+                    else:
+                        lst.append(hex(tmp_addr)+':'+b[0]+':'+b[1])
+                        trace.setMeta('IATList', lst)
+
+                except:
+                    print "\t\t ********** ISSUE **********"
+                
+                    # if(i[2] == accept):
+                    #   Do something specific to accept
+                    #   ******************************
+
+
+
+            print "%16s: %s" % ("[*] Opcode[0]", ord(opcode[0]))
+
+            # 15 is movzx esi, word [edi] AND movzx edi, word [ecx]
+            # 102 is scasd
+            # 242 is scasb ?
+            if((ord(opcode[0]) == 102) or (ord(opcode[0]) == 15) or (ord(opcode[0]) == 242)):
+                print "%16s: %s" % ("[*] PROBLEM OPCODE", "Detected")
+                try:
+                    test = trace.probeMemory(edi,4, envi.memory.MM_READ)
+                    print "[*] Readable Memory: ", test
+                    if test:
+                        print "%16s: %s" % ("MEM", trace.readMemory(edi, 4))
+
+                except Exception as e:
+                    print type(e)
+                    print e.args
+                    print e
+
+                    print "%16s: %s" % ("Error Reading Mem from", hex(edi))
+            
+            p = trace.getMeta('PendingSignal')
+            if p!= None:
+                trace.setMeta('OrigSignal', p)
+                trace.setMeta('PendingSignal', None)
+
+            #notif = CustomNotifier()
+            eve = vtrace.NOTIFY_SIGNAL
+            
+            trace.deregisterNotifier(eve, notif)
+            trace.stepi()
+                        
+            trace.registerNotifier(eve, notif)
+
+            trace.protectMemory(begin, size, envi.memory.MM_NONE)
+            trace.runAgain(val=True)
+            print "---------------------------------------------------------"
+    else:
+        print "vtrace.NOTIFY_WTF_HUH?", printableEIP(trace)
 
 # Will decode shellcode in a linear manner
 # shellcode must be in the format '\x90\x90\xCC\xCC'
@@ -313,6 +533,45 @@ def disasm(trace, shell):
             i += 1
             count += 1
             continue
+
+def printInfo(trace):
+    eip = trace.getRegister(REG_EIP)
+    
+    dis = getOpCode(trace, trace.getRegister(REG_EIP))
+    disLen = len(dis)
+    opcode = trace.readMemory(eip, len(dis))
+
+    es = trace.getRegisterByName("es")
+    ds = trace.getRegisterByName("ds")
+    cs = trace.getRegisterByName("cs")
+    
+    ef = trace.getRegisterByName("eflags")
+
+    edi = trace.getRegister(REG_EDI)
+    esi = trace.getRegister(REG_ESI)
+    esp = trace.getRegister(REG_ESP)
+
+    print "[*] Bestname: ", trace.getSymByAddr(eip, exact=False)
+    print "%16s: %s" % ("EIP", hex(eip))
+    
+    print "%16s: %s" % ("DIS", dis)
+    print "%16s: %s" % ("OPCODE", repr(opcode))
+    print "%16s: %s" % ("ES", es)
+    print "%16s: %s" % ("DS", ds)
+    print "%16s: %s" % ("CS", cs)
+    print "%16s: %s" % ("EAX", hex(trace.getRegister(REG_EAX)))
+    print "%16s: %s" % ("EBX", hex(trace.getRegister(REG_EBX)))
+    print "%16s: %s" % ("ECX", hex(trace.getRegister(REG_ECX)))
+    print "%16s: %s" % ("EDX", hex(trace.getRegister(REG_EDX)))
+    
+    print "%16s: %s" % ("EDI", hex(edi))
+    print "%16s: %s" % ("ESI", hex(esi))
+
+    print "%16s: %s" % ("ESP", hex(esp))
+    print "%16s: %s" % ("[ESP]", repr(trace.readMemory(esp, 4)))
+    
+    print("%16s: %s" % ("Direction", bool(ef & EFLAGS_DF)))
+
 
 ############################################################
 # Super ghetto, not recommended
